@@ -2,12 +2,12 @@ import { embedQueryLocally } from './localEmbeddings';
 
 // Batch size 10 ensures each serverless API request takes < 1-2s, safely under Vercel Hobby 10s limit
 const BATCH_SIZE = 10;
-const EMBEDDING_MODEL = 'text-embedding-004';
+const EMBEDDING_MODEL = 'gemini-embedding-001';
 const OUTPUT_DIMENSIONS = 768;
 const CLIENT_GEMINI_KEY = import.meta.env.VITE_GEMINI_API_KEY;
 
 /**
- * Direct client-side embedding via Google Gemini text-embedding-004 if VITE_GEMINI_API_KEY is available.
+ * Direct client-side embedding via Google Gemini gemini-embedding-001 if VITE_GEMINI_API_KEY is available.
  */
 async function embedDirectlyWithClientKey(cleanText) {
   if (!CLIENT_GEMINI_KEY) return null;
@@ -31,7 +31,7 @@ async function embedDirectlyWithClientKey(cleanText) {
 }
 
 /**
- * Direct client-side batch embedding via Google Gemini text-embedding-004.
+ * Direct client-side batch embedding via Google Gemini gemini-embedding-001.
  */
 async function embedBatchDirectlyWithClientKey(texts) {
   if (!CLIENT_GEMINI_KEY) return null;

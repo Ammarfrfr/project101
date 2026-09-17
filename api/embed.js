@@ -1,6 +1,6 @@
 /**
  * Vercel Serverless Function: /api/embed
- * Securely proxies embeddings requests to Google Gemini text-embedding-004
+ * Securely proxies embeddings requests to Google Gemini gemini-embedding-001
  * Works seamlessly in Vercel Serverless (Hobby plan) and local Vite dev server.
  */
 
@@ -31,12 +31,12 @@ export default async function handler(req, res) {
 
     // Single query embedding
     if (typeof text === 'string' && text.trim().length > 0) {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=${apiKey}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key=${apiKey}`;
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: 'models/text-embedding-004',
+          model: 'models/gemini-embedding-001',
           content: {
             parts: [{ text: text.trim() }]
           },
@@ -55,9 +55,9 @@ export default async function handler(req, res) {
 
     // Batch embedding (micro-batches of 10 chunks)
     if (Array.isArray(texts) && texts.length > 0) {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:batchEmbedContents?key=${apiKey}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents?key=${apiKey}`;
       const requests = texts.map(t => ({
-        model: 'models/text-embedding-004',
+        model: 'models/gemini-embedding-001',
         content: {
           parts: [{ text: (t || '').trim() }]
         },
