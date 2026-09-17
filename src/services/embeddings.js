@@ -117,21 +117,25 @@ export async function embedChunks(chunks, onProgress) {
         });
 
         if (response.status === 429) {
-          retries--;
           const errData = await response.json().catch(() => null);
-          
-          // Parse Google's exact retry delay if provided (e.g. "Please retry in 28.4s" or RetryInfo)
-          let waitSeconds = 12;
-          if (errData?.error?.message) {
-            const match = errData.error.message.match(/retry in ([0-9.]+)s/i);
-            if (match) {
-              const sec = Math.ceil(parseFloat(match[1]));
-              if (!isNaN(sec) && sec > 0) waitSeconds = sec + 2;
-            }
+          const errMsg = errData?.error?.message || '';
+
+          // If the daily free tier quota (1000 requests/day) is exhausted, stop immediately
+          if (errMsg.includes('limit: 1000') || errMsg.includes('generativelanguage.googleapis.com/embed_content_free_tier_requests') || errMsg.includes('billing')) {
+            throw new Error('Gemini API Free-Tier daily limit (1,000 embeds/day) reached on this key. Please use a smaller PDF (1-20 pages) or create a fresh free key at aistudio.google.com.');
+          }
+
+          retries--;
+          // Parse Google's exact retry delay if provided (e.g. "Please retry in 28.4s")
+          let waitSeconds = 15;
+          const match = errMsg.match(/retry in ([0-9.]+)s/i);
+          if (match) {
+            const sec = Math.ceil(parseFloat(match[1]));
+            if (!isNaN(sec) && sec > 0) waitSeconds = Math.min(sec + 2, 45);
           }
 
           if (retries <= 0) {
-            throw new Error(`Gemini API quota exceeded. Please wait a minute and try again or use a smaller document.`);
+            throw new Error(`Gemini API rate limit reached. Please wait a minute or try a smaller document.`);
           }
 
           // Live countdown timer in the progress modal
@@ -142,7 +146,7 @@ export async function embedChunks(chunks, onProgress) {
                 total,
                 percentage: Math.round((i / total) * 100),
                 stage: 'embedding',
-                message: `Gemini API rate limit cooldown: resuming in ${s}s (${i}/${total} chunks indexed)...`
+                message: `Gemini API cooldown: resuming in ${s}s (${i}/${total} chunks indexed)...`
               });
             }
             await new Promise(res => setTimeout(res, 1000));
