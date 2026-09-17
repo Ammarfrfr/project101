@@ -4,11 +4,10 @@
  */
 
 const GEMINI_MODELS = [
-  'gemini-2.0-flash',
-  'gemini-2.5-flash',
-  'gemini-1.5-flash-latest',
-  'gemini-1.5-flash',
-  'gemini-1.5-pro'
+  'gemini-3.8-flash',
+  'gemini-3.7-flash',
+  'gemini-3.5-flash',
+  'gemini-3.1-flash-lite'
 ];
 
 export default async function handler(req, res) {
@@ -66,13 +65,13 @@ export default async function handler(req, res) {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        res.write(value);
+        res.write(Buffer.from(value));
       }
       return res.end();
     }
 
     if (!apiKey) {
-      return res.status(500).json({ error: 'GEMINI_API_KEY is not configured in server environment variables.' });
+      return res.status(500).json({ error: 'GEMINI_API_KEY is not configured in Vercel Environment Variables.' });
     }
 
     const requestBody = {
@@ -100,14 +99,15 @@ export default async function handler(req, res) {
           body: JSON.stringify(requestBody)
         });
 
-        if (geminiRes.status === 503 || geminiRes.status === 404) {
-          lastError = new Error(`Model ${modelName} returned ${geminiRes.status}`);
-          continue;
+        if (geminiRes.status === 503 || geminiRes.status === 404 || geminiRes.status === 429) {
+          const statusText = await geminiRes.text().catch(() => '');
+          lastError = new Error(`Model ${modelName} returned status ${geminiRes.status}: ${statusText}`);
+          continue; // Try fallback model in list
         }
 
         if (!geminiRes.ok) {
           const errText = await geminiRes.text();
-          return res.status(geminiRes.status).json({ error: `Gemini Chat Error: ${errText}` });
+          return res.status(geminiRes.status).json({ error: `Gemini Chat Error (${modelName}): ${errText}` });
         }
 
         res.writeHead(200, {
@@ -120,7 +120,7 @@ export default async function handler(req, res) {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          res.write(value);
+          res.write(Buffer.from(value));
         }
         return res.end();
       } catch (err) {
@@ -128,9 +128,9 @@ export default async function handler(req, res) {
       }
     }
 
-    return res.status(503).json({ error: lastError?.message || 'Gemini models unavailable' });
+    return res.status(503).json({ error: lastError?.message || 'Gemini models are currently unavailable.' });
   } catch (err) {
     console.error('Server /api/chat error:', err);
-    return res.status(500).json({ error: err.message || 'Internal server error' });
+    return res.status(500).json({ error: err.message || 'Internal server error in chat endpoint' });
   }
 }
