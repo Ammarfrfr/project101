@@ -1,13 +1,13 @@
 /**
- * Splits extracted pages into ~400 word chunks with 50-word overlap,
- * preserving page number tagging.
+ * Splits extracted pages into ~650 word chunks with 60-word overlap,
+ * preserving page number tagging and rich context.
  * 
  * @param {Array<{ pageNumber: number, text: string }>} pages 
- * @param {number} chunkSizeWords - target words per chunk (default: 400)
- * @param {number} overlapWords - overlap words between chunks (default: 50)
+ * @param {number} chunkSizeWords - target words per chunk (default: 650)
+ * @param {number} overlapWords - overlap words between chunks (default: 60)
  * @returns {Array<{ chunkIndex: number, pageNumber: number, text: string }>}
  */
-export function chunkPages(pages, chunkSizeWords = 400, overlapWords = 50) {
+export function chunkPages(pages, chunkSizeWords = 650, overlapWords = 60) {
   const chunks = [];
   let globalChunkIndex = 0;
 

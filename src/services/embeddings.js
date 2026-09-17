@@ -1,51 +1,63 @@
+import { embedChunksLocally, embedQueryLocally } from './localEmbeddings';
+
 const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || import.meta.env.GEMINI_API_KEY;
 
 const EMBEDDING_MODEL = 'gemini-embedding-001';
-const BATCH_SIZE = 20; // 20 chunks per request keeps payload size and rate limits optimal
+const BATCH_SIZE = 25; // 25 chunks per request keeps payload size and rate limits optimal
 const OUTPUT_DIMENSIONS = 768;
 
 /**
  * Embeds a single query string for cosine similarity search.
+ * Uses Gemini API if available, otherwise seamlessly falls back to In-Browser AI.
+ * 
  * @param {string} text - Query text
  * @returns {Promise<number[]>} 768-dimension vector
  */
 export async function embedQuery(text) {
-  if (!GEMINI_API_KEY) {
-    throw new Error('Gemini API key is not configured. Please set VITE_GEMINI_API_KEY in your environment.');
-  }
-
   const cleanText = (text || '').trim();
   if (!cleanText) {
     throw new Error('Cannot embed empty query text.');
   }
 
+  // If no Gemini API key configured, use in-browser Transformer model
+  if (!GEMINI_API_KEY) {
+    return embedQueryLocally(cleanText);
+  }
+
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${EMBEDDING_MODEL}:embedContent?key=${GEMINI_API_KEY}`;
   
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: `models/${EMBEDDING_MODEL}`,
-      content: {
-        parts: [{ text: cleanText }]
-      },
-      outputDimensionality: OUTPUT_DIMENSIONS
-    })
-  });
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: `models/${EMBEDDING_MODEL}`,
+        content: {
+          parts: [{ text: cleanText }]
+        },
+        outputDimensionality: OUTPUT_DIMENSIONS
+      })
+    });
 
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Failed to generate query embedding: ${response.status} - ${errText}`);
+    if (!response.ok) {
+      // Fallback to local in-browser embedding
+      console.warn('Gemini query embed failed, falling back to in-browser embedding.');
+      return embedQueryLocally(cleanText);
+    }
+
+    const data = await response.json();
+    const vector = data.embedding?.values;
+    if (!Array.isArray(vector) || vector.length === 0) {
+      return embedQueryLocally(cleanText);
+    }
+
+    return vector;
+  } catch (err) {
+    console.warn('Gemini embedQuery network error, using in-browser fallback:', err);
+    return embedQueryLocally(cleanText);
   }
-
-  const data = await response.json();
-  const vector = data.embedding?.values;
-  if (!Array.isArray(vector) || vector.length === 0) {
-    throw new Error('Gemini API returned an empty vector for the query.');
-  }
-
-  return vector;
 }
+
 
 /**
  * Embeds a single text piece as fallback
@@ -80,13 +92,17 @@ async function embedSingleChunk(text) {
  * @returns {Promise<Array<{ chunkIndex: number, pageNumber: number, text: string, embedding: number[] }>>}
  */
 export async function embedChunks(chunks, onProgress) {
-  if (!GEMINI_API_KEY) {
-    throw new Error('Gemini API key is missing. Make sure VITE_GEMINI_API_KEY is configured in your deployment settings.');
-  }
-
   const validChunks = (chunks || []).filter(c => c && typeof c.text === 'string' && c.text.trim().length > 0);
   if (validChunks.length === 0) {
     throw new Error('No valid text content found in document to embed.');
+  }
+
+  // If no Gemini API key configured, use in-browser Transformer embedding directly
+  if (!GEMINI_API_KEY) {
+    if (onProgress) {
+      onProgress({ stage: 'embedding', message: 'Using In-Browser Local AI for 100% free embeddings...', percentage: 48 });
+    }
+    return embedChunksLocally(validChunks, onProgress);
   }
 
   const total = validChunks.length;
@@ -120,9 +136,27 @@ export async function embedChunks(chunks, onProgress) {
           const errData = await response.json().catch(() => null);
           const errMsg = errData?.error?.message || '';
 
-          // If the daily free tier quota (1000 requests/day) is exhausted, stop immediately
+          // If daily quota (1000 requests) is exhausted, switch seamlessly to in-browser embedding for remaining chunks!
           if (errMsg.includes('limit: 1000') || errMsg.includes('generativelanguage.googleapis.com/embed_content_free_tier_requests') || errMsg.includes('billing')) {
-            throw new Error('Gemini API Free-Tier daily limit (1,000 embeds/day) reached on this key. Please use a smaller PDF (1-20 pages) or create a fresh free key at aistudio.google.com.');
+            if (onProgress) {
+              onProgress({
+                stage: 'embedding',
+                message: 'Gemini daily quota reached. Switching to In-Browser AI embeddings...',
+                percentage: Math.round((i / total) * 100)
+              });
+            }
+            const remainingChunks = validChunks.slice(i);
+            const localResults = await embedChunksLocally(remainingChunks, (lp) => {
+              if (onProgress) {
+                const combinedPct = Math.round((i / total) * 100) + Math.round((lp.current / remainingChunks.length) * (100 - Math.round((i / total) * 100)));
+                onProgress({
+                  stage: 'embedding',
+                  message: `Local AI embedding chunk ${i + lp.current} of ${total}...`,
+                  percentage: combinedPct
+                });
+              }
+            });
+            return [...results, ...localResults];
           }
 
           retries--;
