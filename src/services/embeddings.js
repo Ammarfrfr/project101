@@ -92,6 +92,7 @@ export async function embedChunks(chunks, onProgress) {
   const total = validChunks.length;
   const results = [];
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${EMBEDDING_MODEL}:batchEmbedContents?key=${GEMINI_API_KEY}`;
+  const BATCH_SIZE = 25;
 
   for (let i = 0; i < validChunks.length; i += BATCH_SIZE) {
     const batch = validChunks.slice(i, i + BATCH_SIZE);
@@ -104,9 +105,8 @@ export async function embedChunks(chunks, onProgress) {
       outputDimensionality: OUTPUT_DIMENSIONS
     }));
 
-    let retries = 6;
+    let retries = 10;
     let batchEmbeddings = null;
-    let waitMs = 2500;
 
     while (retries > 0 && !batchEmbeddings) {
       try {
@@ -118,20 +118,35 @@ export async function embedChunks(chunks, onProgress) {
 
         if (response.status === 429) {
           retries--;
-          if (retries === 0) {
-            throw new Error('Gemini API free tier rate limit reached. Please wait a minute and try again.');
+          const errData = await response.json().catch(() => null);
+          
+          // Parse Google's exact retry delay if provided (e.g. "Please retry in 28.4s" or RetryInfo)
+          let waitSeconds = 12;
+          if (errData?.error?.message) {
+            const match = errData.error.message.match(/retry in ([0-9.]+)s/i);
+            if (match) {
+              const sec = Math.ceil(parseFloat(match[1]));
+              if (!isNaN(sec) && sec > 0) waitSeconds = sec + 2;
+            }
           }
-          if (onProgress) {
-            onProgress({
-              current: i,
-              total,
-              percentage: Math.round((i / total) * 100),
-              stage: 'embedding',
-              message: `Gemini rate limit cooldown (${Math.round(waitMs / 1000)}s)...`
-            });
+
+          if (retries <= 0) {
+            throw new Error(`Gemini API quota exceeded. Please wait a minute and try again or use a smaller document.`);
           }
-          await new Promise(res => setTimeout(res, waitMs));
-          waitMs = Math.min(waitMs * 1.8, 15000);
+
+          // Live countdown timer in the progress modal
+          for (let s = waitSeconds; s > 0; s--) {
+            if (onProgress) {
+              onProgress({
+                current: i,
+                total,
+                percentage: Math.round((i / total) * 100),
+                stage: 'embedding',
+                message: `Gemini API rate limit cooldown: resuming in ${s}s (${i}/${total} chunks indexed)...`
+              });
+            }
+            await new Promise(res => setTimeout(res, 1000));
+          }
           continue;
         }
 
@@ -147,11 +162,10 @@ export async function embedChunks(chunks, onProgress) {
           throw new Error('Incomplete embedding batch returned by Gemini API');
         }
       } catch (err) {
-        if (err.message.includes('rate limit') || err.message.includes('429')) {
+        if (err.message.includes('rate limit') || err.message.includes('quota') || err.message.includes('429')) {
           retries--;
-          if (retries === 0) throw err;
-          await new Promise(res => setTimeout(res, waitMs));
-          waitMs = Math.min(waitMs * 1.8, 15000);
+          if (retries <= 0) throw err;
+          await new Promise(res => setTimeout(res, 5000));
         } else if (retries > 1) {
           retries--;
           await new Promise(res => setTimeout(res, 2000));
@@ -191,16 +205,18 @@ export async function embedChunks(chunks, onProgress) {
         current: completed,
         total,
         percentage: Math.round((completed / total) * 100),
-        stage: 'embedding'
+        stage: 'embedding',
+        message: `Embedded ${completed} of ${total} chunks (${Math.round((completed / total) * 100)}%)...`
       });
     }
 
-    // Small throttle between batches to avoid immediate rate limit triggers
+    // Small throttle between batches to avoid spamming the rate limiter
     if (i + BATCH_SIZE < validChunks.length) {
-      await new Promise(res => setTimeout(res, 600));
+      await new Promise(res => setTimeout(res, 1200));
     }
   }
 
   return results;
 }
+
 
