@@ -65,7 +65,7 @@ export async function uploadAndProcessDocument(file, userId, onProgress) {
       throw new Error('Failed to generate chunks from document text.');
     }
 
-    // Step 4: Embed chunks with Gemini text-embedding-004
+    // Step 4: Embed chunks with Gemini gemini-embedding-001
     if (onProgress) {
       onProgress({ stage: 'embedding', message: `Generating embeddings for ${rawChunks.length} chunks...`, percentage: 45 });
     }
@@ -73,11 +73,12 @@ export async function uploadAndProcessDocument(file, userId, onProgress) {
     const chunksWithEmbeddings = await embedChunks(rawChunks, (ep) => {
       if (onProgress) {
         // Scale embedding progress from 45% to 85%
-        const embeddingPct = 45 + Math.round((ep.current / ep.total) * 40);
+        const rawPct = typeof ep.percentage === 'number' ? ep.percentage : (ep.total ? Math.round(((ep.current || 0) / ep.total) * 100) : 0);
+        const embeddingPct = 45 + Math.round((rawPct / 100) * 40);
         onProgress({
           stage: 'embedding',
-          message: ep.message || `Embedding chunk ${ep.current} of ${ep.total}...`,
-          percentage: embeddingPct
+          message: ep.message || `Embedding chunks (${rawPct}%)...`,
+          percentage: Math.min(embeddingPct, 85)
         });
       }
     });

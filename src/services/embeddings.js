@@ -1,10 +1,13 @@
 import { embedQueryLocally } from './localEmbeddings';
 
-// Batch size 10 ensures each serverless API request takes < 1-2s, safely under Vercel Hobby 10s limit
-const BATCH_SIZE = 10;
+// Batch size 25: 4x fewer requests, keeping well under Gemini free tier 100 RPM ceiling
+const BATCH_SIZE = 25;
 const EMBEDDING_MODEL = 'gemini-embedding-001';
 const OUTPUT_DIMENSIONS = 768;
 const CLIENT_GEMINI_KEY = import.meta.env.VITE_GEMINI_API_KEY;
+
+// Exponential backoff delays in milliseconds for rate-limit retries
+const RETRY_DELAYS = [3000, 6000, 12000, 20000, 30000];
 
 /**
  * Direct client-side embedding via Google Gemini gemini-embedding-001 if VITE_GEMINI_API_KEY is available.
@@ -102,9 +105,10 @@ export async function embedQuery(text) {
 }
 
 /**
- * Embeds a list of document chunks in micro-batches (10 chunks per call),
+ * Embeds a list of document chunks in micro-batches (25 chunks per call),
  * fully compatible with Vercel Hobby plan 10s serverless timeout,
- * with automatic retries, backoff, and responsive UI yielding.
+ * with rate-limit throttling (1200ms gap = ~50 RPM max, well under Gemini's 100 RPM free limit),
+ * automatic exponential backoff retries on 429, and responsive UI progress yielding.
  * 
  * @param {Array<{ chunkIndex: number, pageNumber: number, text: string }>} chunks 
  * @param {Function} onProgress - Callback { current, total, percentage, stage, message }
@@ -123,11 +127,12 @@ export async function embedChunks(chunks, onProgress) {
     const batch = validChunks.slice(i, i + BATCH_SIZE);
     const texts = batch.map(chunk => chunk.text.trim());
 
-    let retries = 3;
+    let attempt = 0;
+    const maxAttempts = RETRY_DELAYS.length;
     let batchEmbeddings = null;
     let lastErrorMsg = null;
 
-    while (retries > 0 && !batchEmbeddings) {
+    while (attempt <= maxAttempts && !batchEmbeddings) {
       try {
         const response = await fetch('/api/embed', {
           method: 'POST',
@@ -136,17 +141,22 @@ export async function embedChunks(chunks, onProgress) {
         });
 
         if (response.status === 429) {
-          retries--;
-          const waitTime = (4 - retries) * 2000;
-          if (onProgress) {
-            onProgress({
-              stage: 'embedding',
-              message: `Gemini API rate limit cooldown: waiting ${waitTime / 1000}s (${i}/${total} chunks indexed)...`,
-              percentage: Math.round((i / total) * 100)
-            });
+          if (attempt < maxAttempts) {
+            const waitTime = RETRY_DELAYS[attempt];
+            attempt++;
+            if (onProgress) {
+              onProgress({
+                stage: 'embedding',
+                message: `Gemini rate limit cooldown: waiting ${waitTime / 1000}s before retry (attempt ${attempt}/${maxAttempts})...`,
+                percentage: Math.round((i / total) * 100)
+              });
+            }
+            await new Promise(res => setTimeout(res, waitTime));
+            continue;
+          } else {
+            lastErrorMsg = 'Gemini free tier rate limit exceeded (100 RPM). Please wait a minute and try again.';
+            break;
           }
-          await new Promise(res => setTimeout(res, waitTime));
-          continue;
         }
 
         if (response.ok) {
@@ -158,18 +168,29 @@ export async function embedChunks(chunks, onProgress) {
         } else {
           const errData = await response.json().catch(() => ({}));
           lastErrorMsg = errData.error || `Server returned ${response.status}`;
-          break; // Don't retry non-429 server errors immediately
+          break; // Don't loop endlessly on non-429 server errors
         }
       } catch (err) {
-        retries--;
-        lastErrorMsg = err.message;
-        if (retries <= 0) break;
-        await new Promise(res => setTimeout(res, 1500));
+        if (attempt < maxAttempts) {
+          const waitTime = RETRY_DELAYS[attempt];
+          attempt++;
+          if (onProgress) {
+            onProgress({
+              stage: 'embedding',
+              message: `Network glitch: retrying in ${waitTime / 1000}s (${i}/${total} chunks done)...`,
+              percentage: Math.round((i / total) * 100)
+            });
+          }
+          await new Promise(res => setTimeout(res, waitTime));
+        } else {
+          lastErrorMsg = err.message;
+          break;
+        }
       }
     }
 
     // Fallback: Try direct client API key if server endpoint had an issue
-    if (!batchEmbeddings) {
+    if (!batchEmbeddings && CLIENT_GEMINI_KEY) {
       batchEmbeddings = await embedBatchDirectlyWithClientKey(texts);
     }
 
@@ -177,7 +198,7 @@ export async function embedChunks(chunks, onProgress) {
     if (!batchEmbeddings) {
       throw new Error(
         lastErrorMsg
-          ? `Embedding failed at chunk ${i + 1}/${total}: ${lastErrorMsg}. Please check that GEMINI_API_KEY is properly set in Vercel Environment Variables.`
+          ? `Embedding failed at chunk ${i + 1}/${total}: ${lastErrorMsg}`
           : `Failed to generate embeddings for document chunks. Please check your Gemini API key and network connection.`
       );
     }
@@ -204,8 +225,8 @@ export async function embedChunks(chunks, onProgress) {
       });
     }
 
-    // Short yield between batches keeps the browser UI smooth and avoids API rate spikes
-    await new Promise(res => setTimeout(res, 250));
+    // 1200ms throttle between batches keeps request rate at ~50 RPM (Gemini free tier allows 100 RPM)
+    await new Promise(res => setTimeout(res, 1200));
   }
 
   return results;
