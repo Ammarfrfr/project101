@@ -148,23 +148,97 @@ export async function uploadAndProcessDocument(file, userId, onProgress) {
  * @param {AbortSignal} [signal]
  */
 export async function executeRagQuery({ query, userId, documentId, onToken, signal }) {
-  // 1. Generate query embedding
-  const queryEmbedding = await embedQuery(query);
+  const cleanQuery = (query || '').trim();
+  const isSummaryQuery = /(summary|summarize|overview|executive summary|main ideas?|main points?|key takeaways?|key lessons?|what is this|about this|explain the book|explain the document|table of contents|outline|core concepts?|synopsis)/i.test(cleanQuery);
 
-  // 2. Call Supabase match_documents function (Cosine similarity)
-  const { data: matchedChunks, error: matchError } = await supabase.rpc('match_documents', {
-    query_embedding: queryEmbedding,
-    match_count: 6,
+  let allChunks = [];
+  const seenIds = new Set();
+
+  const addChunks = (chunks) => {
+    for (const chunk of chunks || []) {
+      if (chunk && chunk.id && !seenIds.has(chunk.id)) {
+        seenIds.add(chunk.id);
+        allChunks.push(chunk);
+      }
+    }
+  };
+
+  // 1. Primary semantic search
+  const primaryEmbedding = await embedQuery(cleanQuery);
+  const { data: primaryMatches, error: primaryErr } = await supabase.rpc('match_documents', {
+    query_embedding: primaryEmbedding,
+    match_count: isSummaryQuery ? 10 : 8,
     filter_document_id: documentId || null,
     filter_user_id: userId
   });
 
-  if (matchError) {
-    throw new Error(`Vector similarity search failed: ${matchError.message}`);
+  if (primaryErr) {
+    throw new Error(`Vector similarity search failed: ${primaryErr.message}`);
+  }
+  addChunks(primaryMatches);
+
+  const docName = primaryMatches?.[0]?.document_name || 'Document';
+
+  // 2. Multi-query thematic expansion & structural cross-section for summaries
+  if (isSummaryQuery) {
+    try {
+      // 2a. Thematic concept search (covers main lessons, chapters, author arguments)
+      const thematicPrompt = `${docName}: Core financial lessons, key chapter concepts, author philosophy, main arguments, definitions of assets and liabilities, and conclusions.`;
+      const thematicEmbedding = await embedQuery(thematicPrompt);
+      const { data: thematicMatches } = await supabase.rpc('match_documents', {
+        query_embedding: thematicEmbedding,
+        match_count: 8,
+        filter_document_id: documentId || null,
+        filter_user_id: userId
+      });
+      addChunks(thematicMatches);
+
+      // 2b. If scoped to a specific document, sample key chapter milestones across the entire book
+      if (documentId) {
+        // Fetch early milestone chunks (Intro / Table of Contents / Chapter 1)
+        const { data: earlyChunks } = await supabase
+          .from('chunks')
+          .select('id, document_id, text, page_number, chunk_index')
+          .eq('document_id', documentId)
+          .order('chunk_index', { ascending: true })
+          .limit(3);
+
+        if (earlyChunks) {
+          addChunks(earlyChunks.map(c => ({ ...c, document_name: docName, similarity: 1.0 })));
+        }
+
+        // Fetch distributed cross-section across middle and ending chapters
+        const { count: totalChunks } = await supabase
+          .from('chunks')
+          .select('*', { count: 'exact', head: true })
+          .eq('document_id', documentId);
+
+        if (totalChunks && totalChunks > 10) {
+          const sampleIndices = [
+            Math.floor(totalChunks * 0.20),
+            Math.floor(totalChunks * 0.40),
+            Math.floor(totalChunks * 0.60),
+            Math.floor(totalChunks * 0.80),
+            Math.max(0, totalChunks - 2)
+          ];
+
+          const { data: sampleChunks } = await supabase
+            .from('chunks')
+            .select('id, document_id, text, page_number, chunk_index')
+            .eq('document_id', documentId)
+            .in('chunk_index', sampleIndices);
+
+          if (sampleChunks) {
+            addChunks(sampleChunks.map(c => ({ ...c, document_name: docName, similarity: 0.95 })));
+          }
+        }
+      }
+    } catch (enrichErr) {
+      console.warn('Thematic expansion search skipped:', enrichErr);
+    }
   }
 
-  if (!matchedChunks || matchedChunks.length === 0) {
-    // Return empty source response
+  if (allChunks.length === 0) {
     const fallbackMessage = "I couldn't find any relevant excerpts in your uploaded documents to answer this question. Try uploading a document or asking about a topic covered in your files.";
     if (onToken) onToken(fallbackMessage, fallbackMessage);
     return {
@@ -173,17 +247,26 @@ export async function executeRagQuery({ query, userId, documentId, onToken, sign
     };
   }
 
+  // Sort chunks chronologically by page_number and chunk_index for continuous narrative context
+  allChunks.sort((a, b) => {
+    if (a.page_number !== b.page_number) return a.page_number - b.page_number;
+    return (a.chunk_index || 0) - (b.chunk_index || 0);
+  });
+
+  // Limit total context chunks to top 14 to fit comfortably within LLM context window
+  const finalChunks = allChunks.slice(0, 14);
+
   // 3. Save User Message in database
   await supabase.from('chat_messages').insert({
     user_id: userId,
     document_id: documentId || null,
     role: 'user',
-    content: query,
+    content: cleanQuery,
     sources: []
   });
 
-  // 4. Stream response from Gemini 2.0 Flash
-  const fullAnswer = await streamGeminiRagChat(query, matchedChunks, onToken, signal);
+  // 4. Stream response from Gemini 3
+  const fullAnswer = await streamGeminiRagChat(cleanQuery, finalChunks, onToken, signal);
 
   // 5. Save Assistant Message in database
   await supabase.from('chat_messages').insert({
@@ -191,7 +274,7 @@ export async function executeRagQuery({ query, userId, documentId, onToken, sign
     document_id: documentId || null,
     role: 'assistant',
     content: fullAnswer,
-    sources: matchedChunks.map(m => ({
+    sources: finalChunks.map(m => ({
       id: m.id,
       document_id: m.document_id,
       document_name: m.document_name,
@@ -203,7 +286,7 @@ export async function executeRagQuery({ query, userId, documentId, onToken, sign
 
   return {
     answer: fullAnswer,
-    sources: matchedChunks
+    sources: finalChunks
   };
 }
 
