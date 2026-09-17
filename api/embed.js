@@ -1,11 +1,11 @@
 /**
  * Vercel Serverless Function: /api/embed
  * Securely proxies embeddings requests to Google Gemini text-embedding-004
- * Keeps GEMINI_API_KEY safe on the server.
+ * Works seamlessly in Vercel Serverless (Hobby plan) and local Vite dev server.
  */
 
 export default async function handler(req, res) {
-  // Support CORS for local dev / cross-origin if needed
+  // Support CORS for cross-origin or dev requests
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -21,7 +21,7 @@ export default async function handler(req, res) {
   const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
   if (!apiKey) {
     return res.status(500).json({ 
-      error: 'GEMINI_API_KEY is not configured in server environment variables.' 
+      error: 'GEMINI_API_KEY is not configured in Vercel environment variables or local .env file.' 
     });
   }
 
@@ -53,7 +53,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ embedding: data.embedding?.values });
     }
 
-    // Batch embedding
+    // Batch embedding (micro-batches of 10 chunks)
     if (Array.isArray(texts) && texts.length > 0) {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:batchEmbedContents?key=${apiKey}`;
       const requests = texts.map(t => ({
@@ -80,9 +80,10 @@ export default async function handler(req, res) {
       return res.status(200).json({ embeddings });
     }
 
-    return res.status(400).json({ error: 'Request body must contain either "text" or "texts" array.' });
+    return res.status(400).json({ error: 'Request body must contain either "text" (string) or "texts" (array of strings).' });
   } catch (err) {
     console.error('Server /api/embed error:', err);
-    return res.status(500).json({ error: err.message || 'Internal server error' });
+    return res.status(500).json({ error: err.message || 'Internal server error in embedding endpoint' });
   }
 }
+

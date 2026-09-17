@@ -78,37 +78,56 @@ export async function parsePdf(file, onProgress) {
   const pages = [];
   let skippedBoilerplateCount = 0;
 
-  for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
-    const page = await pdfDoc.getPage(pageNumber);
-    const textContent = await page.getTextContent();
-    
-    // Join text chunks cleanly
-    const rawText = textContent.items
-      .map(item => ('str' in item ? item.str : ''))
-      .join(' ')
-      .replace(/\s+/g, ' ')
-      .trim();
+  try {
+    for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
+      const page = await pdfDoc.getPage(pageNumber);
+      const textContent = await page.getTextContent();
+      
+      // Join text chunks cleanly
+      const rawText = textContent.items
+        .map(item => ('str' in item ? item.str : ''))
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
 
-    // Check if this page is boilerplate (TOC, copyright, dedication, empty)
-    if (isBoilerplatePage(rawText, pageNumber, pageCount)) {
-      skippedBoilerplateCount++;
-    } else {
-      pages.push({
-        pageNumber,
-        text: rawText
-      });
+      // Free page memory immediately
+      if (typeof page.cleanup === 'function') {
+        page.cleanup();
+      }
+
+      // Check if this page is boilerplate (TOC, copyright, dedication, empty)
+      if (isBoilerplatePage(rawText, pageNumber, pageCount)) {
+        skippedBoilerplateCount++;
+      } else {
+        pages.push({
+          pageNumber,
+          text: rawText
+        });
+      }
+
+      if (onProgress) {
+        onProgress({
+          current: pageNumber,
+          total: pageCount,
+          percentage: Math.round((pageNumber / pageCount) * 100),
+          stage: 'parsing',
+          message: skippedBoilerplateCount > 0 
+            ? `Extracting text (p.${pageNumber}/${pageCount}, filtered ${skippedBoilerplateCount} boilerplate pages)...`
+            : `Extracting text from page ${pageNumber} of ${pageCount}...`
+        });
+      }
+
+      // Yield main thread every 2 pages to keep the UI smooth and prevent tab freezing
+      if (pageNumber % 2 === 0) {
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
     }
-
-    if (onProgress) {
-      onProgress({
-        current: pageNumber,
-        total: pageCount,
-        percentage: Math.round((pageNumber / pageCount) * 100),
-        stage: 'parsing',
-        message: skippedBoilerplateCount > 0 
-          ? `Extracting text (p.${pageNumber}/${pageCount}, filtered ${skippedBoilerplateCount} boilerplate pages)...`
-          : `Extracting text from page ${pageNumber} of ${pageCount}...`
-      });
+  } finally {
+    if (typeof pdfDoc.cleanup === 'function') {
+      pdfDoc.cleanup();
+    }
+    if (typeof pdfDoc.destroy === 'function') {
+      pdfDoc.destroy();
     }
   }
 

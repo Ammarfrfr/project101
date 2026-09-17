@@ -12,27 +12,33 @@ function apiDevServerPlugin(env) {
     configureServer(server) {
       server.middlewares.use(async (req, res, next) => {
         const url = req.url ? req.url.split('?')[0] : '';
-        if (url === '/api/embed') {
-          const buffers = [];
-          for await (const chunk of req) buffers.push(chunk);
-          req.body = buffers.length ? JSON.parse(Buffer.concat(buffers).toString()) : {};
-          res.status = (code) => { res.statusCode = code; return res; };
+        if (url === '/api/embed' || url === '/api/chat') {
+          try {
+            const buffers = [];
+            for await (const chunk of req) buffers.push(chunk);
+            const rawBody = Buffer.concat(buffers).toString();
+            req.body = rawBody ? JSON.parse(rawBody) : {};
+          } catch {
+            req.body = {};
+          }
+
+          res.status = (code) => { 
+            res.statusCode = code; 
+            return res; 
+          };
           res.json = (data) => {
-            res.setHeader('Content-Type', 'application/json');
+            if (!res.headersSent) {
+              res.setHeader('Content-Type', 'application/json');
+            }
             res.end(JSON.stringify(data));
           };
-          return embedHandler(req, res);
-        }
-        if (url === '/api/chat') {
-          const buffers = [];
-          for await (const chunk of req) buffers.push(chunk);
-          req.body = buffers.length ? JSON.parse(Buffer.concat(buffers).toString()) : {};
-          res.status = (code) => { res.statusCode = code; return res; };
-          res.json = (data) => {
-            res.setHeader('Content-Type', 'application/json');
-            res.end(JSON.stringify(data));
-          };
-          return chatHandler(req, res);
+
+          if (url === '/api/embed') {
+            return embedHandler(req, res);
+          }
+          if (url === '/api/chat') {
+            return chatHandler(req, res);
+          }
         }
         next();
       });

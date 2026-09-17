@@ -31,95 +31,106 @@ export async function uploadAndProcessDocument(file, userId, onProgress) {
     throw new Error('No readable text could be extracted from this PDF. Please ensure it is not a scanned image.');
   }
 
-  // Step 2: Create Document entry in Supabase
-  if (onProgress) {
-    onProgress({ stage: 'saving_doc', message: 'Creating document metadata in database...', percentage: 35 });
-  }
-  
-  const { data: docRecord, error: docError } = await supabase
-    .from('documents')
-    .insert({
-      user_id: userId,
-      name: parsedData.name,
-      page_count: parsedData.pageCount,
-      file_size_bytes: parsedData.fileSizeBytes,
-      chunk_count: 0
-    })
-    .select()
-    .single();
-
-  if (docError) {
-    throw new Error(`Failed to save document: ${docError.message}`);
-  }
-
-  // Step 3: Chunk text with overlap
-  if (onProgress) {
-    onProgress({ stage: 'chunking', message: 'Chunking pages into ~400 word segments...', percentage: 40 });
-  }
-  const rawChunks = chunkPages(parsedData.pages);
-
-  if (rawChunks.length === 0) {
-    throw new Error('Failed to generate chunks from document text.');
-  }
-
-  // Step 4: Embed chunks with Gemini text-embedding-004
-  if (onProgress) {
-    onProgress({ stage: 'embedding', message: `Generating embeddings for ${rawChunks.length} chunks...`, percentage: 45 });
-  }
-  
-  const chunksWithEmbeddings = await embedChunks(rawChunks, (ep) => {
+  let docRecord = null;
+  try {
+    // Step 2: Create Document entry in Supabase
     if (onProgress) {
-      // Scale embedding progress from 45% to 85%
-      const embeddingPct = 45 + Math.round((ep.current / ep.total) * 40);
-      onProgress({
-        stage: 'embedding',
-        message: ep.message || `Embedding chunk ${ep.current} of ${ep.total}...`,
-        percentage: embeddingPct
-      });
+      onProgress({ stage: 'saving_doc', message: 'Creating document metadata in database...', percentage: 35 });
     }
-  });
+    
+    const { data: createdDoc, error: docError } = await supabase
+      .from('documents')
+      .insert({
+        user_id: userId,
+        name: parsedData.name,
+        page_count: parsedData.pageCount,
+        file_size_bytes: parsedData.fileSizeBytes,
+        chunk_count: 0
+      })
+      .select()
+      .single();
 
-  // Step 5: Batch insert chunks into Supabase table
-  if (onProgress) {
-    onProgress({ stage: 'saving_chunks', message: 'Storing vector embeddings in Supabase pgvector...', percentage: 90 });
-  }
-
-  const DB_BATCH_SIZE = 50;
-  for (let i = 0; i < chunksWithEmbeddings.length; i += DB_BATCH_SIZE) {
-    const batch = chunksWithEmbeddings.slice(i, i + DB_BATCH_SIZE).map(c => ({
-      document_id: docRecord.id,
-      user_id: userId,
-      text: c.text,
-      page_number: c.pageNumber,
-      chunk_index: c.chunkIndex,
-      embedding: c.embedding
-    }));
-
-    const { error: chunkError } = await supabase
-      .from('chunks')
-      .insert(batch);
-
-    if (chunkError) {
-      // Clean up orphaned document
-      await supabase.from('documents').delete().eq('id', docRecord.id);
-      throw new Error(`Failed to store vector chunks: ${chunkError.message}`);
+    if (docError) {
+      throw new Error(`Failed to save document metadata: ${docError.message}`);
     }
+    docRecord = createdDoc;
+
+    // Step 3: Chunk text with overlap
+    if (onProgress) {
+      onProgress({ stage: 'chunking', message: 'Chunking pages into ~650 word segments...', percentage: 40 });
+    }
+    const rawChunks = chunkPages(parsedData.pages);
+
+    if (rawChunks.length === 0) {
+      throw new Error('Failed to generate chunks from document text.');
+    }
+
+    // Step 4: Embed chunks with Gemini text-embedding-004
+    if (onProgress) {
+      onProgress({ stage: 'embedding', message: `Generating embeddings for ${rawChunks.length} chunks...`, percentage: 45 });
+    }
+    
+    const chunksWithEmbeddings = await embedChunks(rawChunks, (ep) => {
+      if (onProgress) {
+        // Scale embedding progress from 45% to 85%
+        const embeddingPct = 45 + Math.round((ep.current / ep.total) * 40);
+        onProgress({
+          stage: 'embedding',
+          message: ep.message || `Embedding chunk ${ep.current} of ${ep.total}...`,
+          percentage: embeddingPct
+        });
+      }
+    });
+
+    // Step 5: Batch insert chunks into Supabase table
+    if (onProgress) {
+      onProgress({ stage: 'saving_chunks', message: 'Storing vector embeddings in Supabase pgvector...', percentage: 90 });
+    }
+
+    const DB_BATCH_SIZE = 50;
+    for (let i = 0; i < chunksWithEmbeddings.length; i += DB_BATCH_SIZE) {
+      const batch = chunksWithEmbeddings.slice(i, i + DB_BATCH_SIZE).map(c => ({
+        document_id: docRecord.id,
+        user_id: userId,
+        text: c.text,
+        page_number: c.pageNumber,
+        chunk_index: c.chunkIndex,
+        embedding: c.embedding
+      }));
+
+      const { error: chunkError } = await supabase
+        .from('chunks')
+        .insert(batch);
+
+      if (chunkError) {
+        throw new Error(`Failed to store vector chunks: ${chunkError.message}`);
+      }
+    }
+
+    // Update chunk count on document
+    await supabase
+      .from('documents')
+      .update({ chunk_count: chunksWithEmbeddings.length })
+      .eq('id', docRecord.id);
+
+    if (onProgress) {
+      onProgress({ stage: 'done', message: 'Document processed and indexed successfully!', percentage: 100 });
+    }
+
+    return {
+      ...docRecord,
+      chunk_count: chunksWithEmbeddings.length
+    };
+  } catch (err) {
+    if (docRecord?.id) {
+      try {
+        await supabase.from('documents').delete().eq('id', docRecord.id);
+      } catch (cleanupErr) {
+        console.error('Failed to clean up orphaned document:', cleanupErr);
+      }
+    }
+    throw err;
   }
-
-  // Update chunk count on document
-  await supabase
-    .from('documents')
-    .update({ chunk_count: chunksWithEmbeddings.length })
-    .eq('id', docRecord.id);
-
-  if (onProgress) {
-    onProgress({ stage: 'done', message: 'Document processed and indexed successfully!', percentage: 100 });
-  }
-
-  return {
-    ...docRecord,
-    chunk_count: chunksWithEmbeddings.length
-  };
 }
 
 /**

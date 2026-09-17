@@ -1,37 +1,10 @@
-import { embedChunksLocally, embedQueryLocally } from './localEmbeddings';
+import { embedQueryLocally } from './localEmbeddings';
 
-const BATCH_SIZE = 25; // 25 chunks per request keeps payload size and rate limits optimal
+// Batch size 10 ensures each serverless API request takes < 1-2s, safely under Vercel Hobby 10s limit
+const BATCH_SIZE = 10;
 const EMBEDDING_MODEL = 'text-embedding-004';
 const OUTPUT_DIMENSIONS = 768;
 const CLIENT_GEMINI_KEY = import.meta.env.VITE_GEMINI_API_KEY;
-
-/**
- * Helper to safely forward in-browser local AI progress to the UI modal without NaN issues.
- */
-function handleLocalProgress(onProgress, lp, offset = 0, total = 1) {
-  if (!onProgress) return;
-
-  if (lp.stage === 'model_download') {
-    onProgress({
-      stage: 'model_download',
-      message: lp.message || 'Downloading local AI model...',
-      percentage: typeof lp.percentage === 'number' ? lp.percentage : 15
-    });
-    return;
-  }
-
-  const current = typeof lp.current === 'number' ? lp.current : 1;
-  const chunkIndex = offset + current;
-  const pct = Math.min(100, Math.round((chunkIndex / Math.max(1, total)) * 100));
-
-  onProgress({
-    stage: 'embedding',
-    current: chunkIndex,
-    total,
-    message: `Local AI embedding chunk ${chunkIndex} of ${total} (${pct}%)...`,
-    percentage: pct
-  });
-}
 
 /**
  * Direct client-side embedding via Google Gemini text-embedding-004 if VITE_GEMINI_API_KEY is available.
@@ -58,8 +31,38 @@ async function embedDirectlyWithClientKey(cleanText) {
 }
 
 /**
+ * Direct client-side batch embedding via Google Gemini text-embedding-004.
+ */
+async function embedBatchDirectlyWithClientKey(texts) {
+  if (!CLIENT_GEMINI_KEY) return null;
+  try {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${EMBEDDING_MODEL}:batchEmbedContents?key=${CLIENT_GEMINI_KEY}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        requests: texts.map(t => ({
+          model: `models/${EMBEDDING_MODEL}`,
+          content: { parts: [{ text: t }] },
+          outputDimensionality: OUTPUT_DIMENSIONS
+        }))
+      })
+    });
+
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (Array.isArray(data?.embeddings) && data.embeddings.length === texts.length) {
+      return data.embeddings.map(e => e.values);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Embeds a single query string for cosine similarity search.
- * Tries serverless /api/embed -> client key -> In-Browser Local AI.
+ * Tries serverless /api/embed -> direct client key -> fast single-query local fallback.
  * 
  * @param {string} text - Query text
  * @returns {Promise<number[]>} 768-dimension vector
@@ -70,7 +73,7 @@ export async function embedQuery(text) {
     throw new Error('Cannot embed empty query text.');
   }
 
-  // 1. Try secure /api/embed endpoint
+  // 1. Try secure /api/embed endpoint (works in Vercel production & local dev server)
   try {
     const response = await fetch('/api/embed', {
       method: 'POST',
@@ -88,19 +91,20 @@ export async function embedQuery(text) {
     // API endpoint unreachable, continue to fallbacks
   }
 
-  // 2. Try direct client key if configured
+  // 2. Try direct client key if configured in .env as VITE_GEMINI_API_KEY
   const directVector = await embedDirectlyWithClientKey(cleanText);
   if (Array.isArray(directVector) && directVector.length > 0) {
     return directVector;
   }
 
-  // 3. Fallback to 100% In-Browser Local AI
+  // 3. Fast fallback for single query
   return embedQueryLocally(cleanText);
 }
 
 /**
- * Embeds a list of document chunks in batches, reporting progress and handling rate limits.
- * Tries /api/embed -> direct client batch -> local in-browser AI.
+ * Embeds a list of document chunks in micro-batches (10 chunks per call),
+ * fully compatible with Vercel Hobby plan 10s serverless timeout,
+ * with automatic retries, backoff, and responsive UI yielding.
  * 
  * @param {Array<{ chunkIndex: number, pageNumber: number, text: string }>} chunks 
  * @param {Function} onProgress - Callback { current, total, percentage, stage, message }
@@ -121,6 +125,7 @@ export async function embedChunks(chunks, onProgress) {
 
     let retries = 3;
     let batchEmbeddings = null;
+    let lastErrorMsg = null;
 
     while (retries > 0 && !batchEmbeddings) {
       try {
@@ -132,15 +137,15 @@ export async function embedChunks(chunks, onProgress) {
 
         if (response.status === 429) {
           retries--;
-          if (retries <= 0) break;
+          const waitTime = (4 - retries) * 2000;
           if (onProgress) {
             onProgress({
               stage: 'embedding',
-              message: `Gemini API cooldown: retrying in 5s (${i}/${total} chunks indexed)...`,
+              message: `Gemini API rate limit cooldown: waiting ${waitTime / 1000}s (${i}/${total} chunks indexed)...`,
               percentage: Math.round((i / total) * 100)
             });
           }
-          await new Promise(res => setTimeout(res, 5000));
+          await new Promise(res => setTimeout(res, waitTime));
           continue;
         }
 
@@ -150,61 +155,31 @@ export async function embedChunks(chunks, onProgress) {
             batchEmbeddings = batchData.embeddings;
             break;
           }
+        } else {
+          const errData = await response.json().catch(() => ({}));
+          lastErrorMsg = errData.error || `Server returned ${response.status}`;
+          break; // Don't retry non-429 server errors immediately
         }
-
-        // If /api/embed returned 404 or other error, break to fallbacks
-        break;
       } catch (err) {
         retries--;
+        lastErrorMsg = err.message;
         if (retries <= 0) break;
         await new Promise(res => setTimeout(res, 1500));
       }
     }
 
-    // Fallback if server /api/embed was not available
+    // Fallback: Try direct client API key if server endpoint had an issue
     if (!batchEmbeddings) {
-      // Try direct client API key if available
-      if (CLIENT_GEMINI_KEY) {
-        try {
-          const url = `https://generativelanguage.googleapis.com/v1beta/models/${EMBEDDING_MODEL}:batchEmbedContents?key=${CLIENT_GEMINI_KEY}`;
-          const directRes = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              requests: texts.map(t => ({
-                model: `models/${EMBEDDING_MODEL}`,
-                content: { parts: [{ text: t }] },
-                outputDimensionality: OUTPUT_DIMENSIONS
-              }))
-            })
-          });
+      batchEmbeddings = await embedBatchDirectlyWithClientKey(texts);
+    }
 
-          if (directRes.ok) {
-            const dData = await directRes.json();
-            if (Array.isArray(dData?.embeddings) && dData.embeddings.length === batch.length) {
-              batchEmbeddings = dData.embeddings.map(e => e.values);
-            }
-          }
-        } catch {
-          // Direct client call failed, fall through to local AI
-        }
-      }
-
-      // If still no embeddings, seamlessly switch to In-Browser Local AI for remaining chunks
-      if (!batchEmbeddings) {
-        if (onProgress) {
-          onProgress({
-            stage: 'embedding',
-            message: 'Switching to In-Browser Local AI for document embeddings...',
-            percentage: Math.round((i / total) * 100)
-          });
-        }
-        const remainingChunks = validChunks.slice(i);
-        const localResults = await embedChunksLocally(remainingChunks, (lp) => {
-          handleLocalProgress(onProgress, lp, i, total);
-        });
-        return [...results, ...localResults];
-      }
+    // If still failed, throw an informative error rather than freezing the user's browser tab
+    if (!batchEmbeddings) {
+      throw new Error(
+        lastErrorMsg
+          ? `Embedding failed at chunk ${i + 1}/${total}: ${lastErrorMsg}. Please check that GEMINI_API_KEY is properly set in Vercel Environment Variables.`
+          : `Failed to generate embeddings for document chunks. Please check your Gemini API key and network connection.`
+      );
     }
 
     for (let j = 0; j < batch.length; j++) {
@@ -229,9 +204,8 @@ export async function embedChunks(chunks, onProgress) {
       });
     }
 
-    if (i + BATCH_SIZE < validChunks.length) {
-      await new Promise(res => setTimeout(res, 600));
-    }
+    // Short yield between batches keeps the browser UI smooth and avoids API rate spikes
+    await new Promise(res => setTimeout(res, 250));
   }
 
   return results;
