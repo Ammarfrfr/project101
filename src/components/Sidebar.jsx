@@ -7,7 +7,8 @@ import {
   Layers, 
   FileSearch, 
   Sparkles,
-  BookOpen
+  BookOpen,
+  KeyRound
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -18,7 +19,8 @@ export function Sidebar({
   searchAllDocs,
   onToggleSearchAll,
   onOpenUpload,
-  onDeleteDoc
+  onDeleteDoc,
+  onOpenChangePassword
 }) {
   const { user, signOut } = useAuth();
 
@@ -145,13 +147,24 @@ export function Sidebar({
             <span className="user-status-badge">Supabase Auth</span>
           </div>
         </div>
-        <button
-          onClick={signOut}
-          className="logout-btn"
-          title="Sign out"
-        >
-          <LogOut className="w-4 h-4" />
-        </button>
+        <div className="sidebar-footer-actions">
+          <button
+            onClick={onOpenChangePassword}
+            className="sidebar-icon-btn"
+            title="Change password"
+            aria-label="Change password"
+          >
+            <KeyRound className="w-4 h-4" />
+          </button>
+          <button
+            onClick={signOut}
+            className="logout-btn"
+            title="Sign out"
+            aria-label="Sign out"
+          >
+            <LogOut className="w-4 h-4" />
+          </button>
+        </div>
       </div>
     </aside>
   );

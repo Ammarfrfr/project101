@@ -5,7 +5,7 @@ import { MainLayout } from './components/MainLayout';
 import { Loader2 } from 'lucide-react';
 
 function AppContent() {
-  const { user, loading } = useAuth();
+  const { user, loading, isPasswordRecovery } = useAuth();
 
   if (loading) {
     return (
@@ -21,6 +21,10 @@ function AppContent() {
         </div>
       </div>
     );
+  }
+
+  if (isPasswordRecovery) {
+    return <LoginPage initialMode="update_password" />;
   }
 
   return user ? <MainLayout /> : <LoginPage />;

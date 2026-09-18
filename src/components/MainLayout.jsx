@@ -3,6 +3,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { Sidebar } from './Sidebar';
 import { ChatView } from './ChatView';
 import { UploadModal } from './UploadModal';
+import { ChangePasswordModal } from './ChangePasswordModal';
 import { getUserDocuments, deleteUserDocument } from '../services/ragPipeline';
 
 export function MainLayout() {
@@ -11,6 +12,7 @@ export function MainLayout() {
   const [selectedDocId, setSelectedDocId] = useState(null);
   const [searchAllDocs, setSearchAllDocs] = useState(false);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
+  const [isChangePasswordOpen, setIsChangePasswordOpen] = useState(false);
   const [loadingDocs, setLoadingDocs] = useState(true);
 
   // Load user's documents
@@ -70,6 +72,7 @@ export function MainLayout() {
         onToggleSearchAll={setSearchAllDocs}
         onOpenUpload={() => setIsUploadModalOpen(true)}
         onDeleteDoc={handleDeleteDocument}
+        onOpenChangePassword={() => setIsChangePasswordOpen(true)}
       />
 
       <ChatView
@@ -85,6 +88,11 @@ export function MainLayout() {
         onClose={() => setIsUploadModalOpen(false)}
         userId={user?.id}
         onUploadSuccess={handleUploadSuccess}
+      />
+
+      <ChangePasswordModal
+        isOpen={isChangePasswordOpen}
+        onClose={() => setIsChangePasswordOpen(false)}
       />
     </div>
   );
